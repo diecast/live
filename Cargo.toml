@@ -1,0 +1,23 @@
+[package]
+name = "diecast-live"
+version = "0.1.0"
+authors = ["Jorge Israel Peña <jorge.israel.p@gmail.com>"]
+
+[dependencies]
+toml = "*"
+typemap = "*"
+hoedown = "*"
+iron = "*"
+mount = "*"
+notify = "*"
+docopt = "*"
+tempdir = "*"
+log = "*"
+time = "*"
+staticfile = "*"
+rustc-serialize = "*"
+ansi_term = "*"
+
+[dependencies.diecast]
+path = "../diecast"
+
