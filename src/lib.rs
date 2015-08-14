@@ -260,13 +260,19 @@ impl Command for Live {
             // TODO
             // this would probably become something like self.site.update();
             let paths = paths.into_iter()
-            .map(|p| support::path_relative_from(&p, &self.site.configuration().input).unwrap().to_path_buf())
+            .map(|p|
+                 support::path_relative_from(&p, &self.site.configuration().input)
+                 .unwrap().to_path_buf())
             .collect::<HashSet<PathBuf>>();
 
+            let modified_label: &'static str = "  Modified";
+
             if paths.len() == 1 {
-                println!("{} {}", Green.bold().paint(diecast::MODIFIED), paths.iter().next().unwrap().display());
+                println!("{} {}",
+                         Green.bold().paint(modified_label),
+                         paths.iter().next().unwrap().display());
             } else {
-                println!("{}", Green.bold().paint(diecast::MODIFIED));
+                println!("{}", Green.bold().paint(modified_label));
 
                 for path in &paths {
                     println!("    {}", path.display());
@@ -275,10 +281,7 @@ impl Command for Live {
 
             let start = PreciseTime::now();
 
-            // TODO
-            // it should be configurable whether to do an update
-            // or a full build. full build is more deterministic
-            try!(self.site.update(paths));
+            try!(self.site.build());
 
             let end = PreciseTime::now();
 
