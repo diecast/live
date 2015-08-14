@@ -20,4 +20,3 @@ ansi_term = "*"
 
 [dependencies.diecast]
 path = "../diecast"
-

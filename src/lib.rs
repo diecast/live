@@ -12,7 +12,7 @@ extern crate rustc_serialize;
 extern crate ansi_term;
 
 use std::sync::mpsc::{channel, TryRecvError};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use std::thread;
 use std::error::Error;
@@ -229,8 +229,12 @@ impl Command for Live {
 
             if let Some(ref pattern) = self.site.configuration().ignore {
                 paths = paths.into_iter()
-                    .filter(|p| !pattern.matches(p))
+                    .filter(|p| !pattern.matches(&Path::new(p.file_name().unwrap())))
                     .collect::<HashSet<PathBuf>>();
+            }
+
+            if paths.is_empty() {
+                continue;
             }
 
             let (mut ready, mut waiting): (HashSet<PathBuf>, HashSet<PathBuf>) =
