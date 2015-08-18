@@ -122,8 +122,8 @@ impl Command for Live {
                 Ok(mut watcher) => {
                     match watcher.watch(&target) {
                         Ok(_) => {},
-                        Err(_) => {
-                            println!("some error with the live command");
+                        Err(e) => {
+                            println!("some error with the live command: {:?}", e);
                             ::std::process::exit(1);
                         },
                     }
