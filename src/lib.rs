@@ -54,7 +54,7 @@ pub struct Live {
 }
 
 impl Live {
-    pub fn new(rules: Vec<Rule>, mut configuration: Configuration) -> Live {
+    pub fn new(mut site: Site) -> Live {
         // 1. merge options into configuration; options overrides config
         // 2. construct site from configuration
         // 3. build site
@@ -69,27 +69,27 @@ impl Live {
         });
 
         if let Some(jobs) = options.flag_jobs {
-            configuration.threads = jobs;
+            site.configuration_mut().threads = jobs;
         }
 
-        configuration.is_preview = true;
+        site.configuration_mut().is_preview = true;
 
         let temp_dir =
-            TempDir::new(configuration.output.file_name().unwrap().to_str().unwrap())
+            TempDir::new(site.configuration_mut().output.file_name().unwrap().to_str().unwrap())
                 .unwrap();
 
-        configuration.output = temp_dir.path().to_path_buf();
+        site.configuration_mut().output = temp_dir.path().to_path_buf();
 
-        println!("output dir: {:?}", configuration.output);
+        println!("output dir: {:?}", site.configuration_mut().output);
 
         Live {
-            site: Site::new(rules, configuration),
+            site: site,
             _temp_dir: temp_dir,
         }
     }
 
-    pub fn plugin(rules: Vec<Rule>, configuration: Configuration) -> Box<Command> {
-        Box::new(Live::new(rules, configuration))
+    pub fn plugin(site: Site) -> Box<Command> {
+        Box::new(Live::new(site))
     }
 }
 
