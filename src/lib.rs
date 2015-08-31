@@ -25,7 +25,7 @@ use iron::Iron;
 use staticfile::Static;
 use ansi_term::Colour::Green;
 
-use diecast::{Command, Site, Configuration, Rule, Plugin};
+use diecast::{Command, Site, Plugin};
 use diecast::support;
 
 pub fn plugin() -> Plugin {
