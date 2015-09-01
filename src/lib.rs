@@ -112,7 +112,7 @@ impl Command for Live {
 
         let _guard =
             Iron::new(Static::new(&site.configuration().output))
-            .listen_with(self.address.clone(), 4, iron::Protocol::Http)
+            .http(self.address.clone())
             .unwrap();
 
         let target = site.configuration().input.clone();
