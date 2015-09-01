@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use std::thread;
 use std::error::Error;
+use std::net::{ToSocketAddrs, SocketAddr};
 
 use docopt::Docopt;
 use tempdir::TempDir;
@@ -25,12 +26,8 @@ use iron::Iron;
 use staticfile::Static;
 use ansi_term::Colour::Green;
 
-use diecast::{Command, Site, Plugin};
+use diecast::{Command, Site, Configuration};
 use diecast::support;
-
-pub fn plugin() -> Plugin {
-    Plugin::new("live", "Live preview of the site", Live::plugin)
-}
 
 #[derive(RustcDecodable, Debug)]
 struct Options {
@@ -49,12 +46,20 @@ Options:
 ";
 
 pub struct Live {
-    _temp_dir: TempDir,
-    site: Site,
+    address: SocketAddr,
 }
 
 impl Live {
-    pub fn new(mut site: Site) -> Live {
+    pub fn new<S>(address: S) -> Live
+    where S: ToSocketAddrs {
+        Live {
+            address: address.to_socket_addrs().ok()
+                     .and_then(|mut addrs| addrs.next())
+                     .expect("Could not parse socket address."),
+        }
+    }
+
+    pub fn configure(&mut self, configuration: &mut Configuration) -> TempDir {
         // 1. merge options into configuration; options overrides config
         // 2. construct site from configuration
         // 3. build site
@@ -69,27 +74,19 @@ impl Live {
         });
 
         if let Some(jobs) = options.flag_jobs {
-            site.configuration_mut().threads = jobs;
+            configuration.threads = jobs;
         }
 
-        site.configuration_mut().is_preview = true;
+        configuration.is_preview = true;
 
         let temp_dir =
-            TempDir::new(site.configuration_mut().output.file_name().unwrap().to_str().unwrap())
+            TempDir::new(configuration.output.file_name().unwrap().to_str().unwrap())
                 .unwrap();
 
-        site.configuration_mut().output = temp_dir.path().to_path_buf();
+        configuration.output = temp_dir.path().to_path_buf();
 
-        println!("output dir: {:?}", site.configuration_mut().output);
-
-        Live {
-            site: site,
-            _temp_dir: temp_dir,
-        }
-    }
-
-    pub fn plugin(site: Site) -> Box<Command> {
-        Box::new(Live::new(site))
+        println!("output dir: {:?}", configuration.output);
+        temp_dir
     }
 }
 
@@ -104,15 +101,21 @@ fn error_str(e: notify::Error) -> String {
 }
 
 impl Command for Live {
-    fn run(&mut self) -> diecast::Result<()> {
+    fn description(&self) -> &'static str {
+        "Live preview of the site"
+    }
+
+    fn run(&mut self, site: &mut Site) -> diecast::Result<()> {
+        let _temp_dir = self.configure(site.configuration_mut());
+
         let (e_tx, e_rx) = channel();
 
         let _guard =
-            Iron::new(Static::new(&self.site.configuration().output))
-            .listen_with("0.0.0.0:5000", 4, iron::Protocol::Http)
+            Iron::new(Static::new(&site.configuration().output))
+            .listen_with(self.address.clone(), 4, iron::Protocol::Http)
             .unwrap();
 
-        let target = self.site.configuration().input.clone();
+        let target = site.configuration().input.clone();
 
         thread::spawn(move || {
             let (tx, rx) = channel();
@@ -212,7 +215,7 @@ impl Command for Live {
             }
         });
 
-        try!(self.site.build());
+        try!(site.build());
 
         println!("finished building");
 
@@ -227,7 +230,7 @@ impl Command for Live {
                 continue;
             }
 
-            if let Some(ref pattern) = self.site.configuration().ignore {
+            if let Some(ref pattern) = site.configuration().ignore {
                 paths = paths.into_iter()
                     .filter(|p| !pattern.matches(&Path::new(p.file_name().unwrap())))
                     .collect::<HashSet<PathBuf>>();
@@ -265,7 +268,7 @@ impl Command for Live {
             // this would probably become something like self.site.update();
             let paths = paths.into_iter()
             .map(|p|
-                 support::path_relative_from(&p, &self.site.configuration().input)
+                 support::path_relative_from(&p, &site.configuration().input)
                  .unwrap().to_path_buf())
             .collect::<HashSet<PathBuf>>();
 
@@ -285,7 +288,7 @@ impl Command for Live {
 
             let start = PreciseTime::now();
 
-            try!(self.site.build());
+            try!(site.build());
 
             let end = PreciseTime::now();
 
