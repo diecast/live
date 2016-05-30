@@ -27,7 +27,6 @@ use staticfile::Static;
 use ansi_term::Colour::Green;
 
 use diecast::{Command, Site, Configuration};
-use diecast::support;
 
 #[derive(RustcDecodable, Debug)]
 struct Options {
@@ -241,7 +240,7 @@ impl Command for Live {
             }
 
             let (mut ready, mut waiting): (HashSet<PathBuf>, HashSet<PathBuf>) =
-                paths.into_iter().partition(|p| support::file_exists(p));
+                paths.into_iter().partition(|p| p.exists());
 
             // TODO optimize
             // so only non-existing paths are still polled?
@@ -256,7 +255,7 @@ impl Command for Live {
                 thread::park_timeout_ms(10);
 
                 let (r, w): (HashSet<PathBuf>, HashSet<PathBuf>) =
-                    waiting.into_iter().partition(|p| support::file_exists(p));
+                    waiting.into_iter().partition(|p| p.exists());
 
                 ready.extend(r.into_iter());
                 waiting = w;
@@ -268,7 +267,7 @@ impl Command for Live {
             // this would probably become something like self.site.update();
             let paths = paths.into_iter()
             .map(|p|
-                 support::path_relative_from(&p, &site.configuration().input)
+                 p.strip_prefix(&site.configuration().input)
                  .unwrap().to_path_buf())
             .collect::<HashSet<PathBuf>>();
 
