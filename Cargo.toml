@@ -4,19 +4,18 @@ version = "0.1.0"
 authors = ["Jorge Israel Peña <jorge.israel.p@gmail.com>"]
 
 [dependencies]
-toml = "*"
 typemap = "*"
-hoedown = "*"
-iron = "*"
-mount = "*"
 notify = "*"
 docopt = "*"
 tempdir = "*"
 log = "*"
 time = "*"
-staticfile = "*"
 rustc-serialize = "*"
 ansi_term = "*"
+
+futures = "*"
+hyper = {git = "https://github.com/hyperium/hyper"}
+url = "*"
 
 [dependencies.diecast]
 path = "../diecast"

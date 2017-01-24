@@ -5,11 +5,12 @@ extern crate docopt;
 extern crate tempdir;
 extern crate time;
 extern crate notify;
-extern crate iron;
-extern crate mount;
-extern crate staticfile;
 extern crate rustc_serialize;
 extern crate ansi_term;
+
+extern crate hyper;
+extern crate url;
+extern crate futures;
 
 use std::sync::mpsc::{channel, TryRecvError};
 use std::path::{Path, PathBuf};
@@ -22,9 +23,15 @@ use docopt::Docopt;
 use tempdir::TempDir;
 use time::{SteadyTime, Duration, PreciseTime};
 use notify::{RecommendedWatcher, Watcher};
-use iron::Iron;
-use staticfile::Static;
 use ansi_term::Colour::Green;
+
+use std::fs::File;
+use std::io::Read;
+
+use hyper::{Get, StatusCode};
+use hyper::server::{Http, Service, Request, Response};
+
+use url::percent_encoding::percent_decode;
 
 use diecast::{Command, Site, Configuration};
 
@@ -44,17 +51,118 @@ Options:
     -v, --verbose       Use verbose output
 ";
 
+struct FileServer {
+    root_path: PathBuf,
+}
+
+impl FileServer {
+    fn new(root_path: PathBuf) -> FileServer {
+        FileServer {
+            root_path: root_path,
+        }
+    }
+
+    fn percent_decode(&self, input: &str) -> String {
+        percent_decode(input.as_bytes()).decode_utf8().unwrap().into_owned()
+    }
+
+    // Perform a component-normalization of the given path. This doesn't
+    // actually really normalize it by consulting the file system.
+    fn normalize_path(&self, path: &Path) -> PathBuf {
+        use std::path::Component;
+
+        path.components()
+            .fold(PathBuf::new(), |mut result, p| {
+                match p {
+                    Component::Normal(x) => {
+                        match x.to_str() {
+                            Some(s) => result.push(self.percent_decode(s)),
+                            None => result.push(x)
+                        }
+
+                        result
+                    }
+                    Component::ParentDir => {
+                        result.pop();
+                        result
+                    },
+                    _ => result
+                }
+            })
+    }
+
+    fn get_target_path(&self, requested_path: &Path) -> Option<PathBuf> {
+        trace!("live: Requested path: {}", requested_path.display());
+
+        let normalized = self.normalize_path(requested_path);
+        trace!("live: Normalized path: {}", normalized.display());
+
+        let target_path = self.root_path.join(normalized);
+        trace!("live: Target path: {}", target_path.display());
+
+        if target_path.is_file() {
+            return Some(target_path.to_path_buf());
+        }
+
+        let index_path = target_path.join("index.html");
+        trace!("live: Index path: {}", index_path.display());
+
+        if index_path.is_file() {
+            Some(index_path.to_path_buf())
+        } else {
+            None
+        }
+    }
+}
+
+impl Service for FileServer {
+    type Request = Request;
+    type Response = Response;
+    type Error = hyper::Error;
+    type Future = ::futures::Finished<Response, hyper::Error>;
+
+    fn call(&self, req: Request) -> Self::Future {
+        let response: Response = match req.method() {
+            &Get => {
+                match self.get_target_path(Path::new(req.path())) {
+                    Some(path) => {
+                        // TODO
+                        // audit path
+                        let mut f = File::open(path).unwrap();
+                        let mut v = Vec::new();
+
+                        // TODO
+                        // Preferably don't read everything into memory first. This is
+                        // done currently because there doesn't seem to be a way to
+                        // stream the file in Hyper yet.
+                        f.read_to_end(&mut v).unwrap();
+
+                        Response::new().with_body(v)
+                    }
+                    None => {
+                        Response::new().with_status(StatusCode::NotFound)
+                    }
+                }
+
+            }
+            _ => Response::new().with_status(StatusCode::NotFound),
+        };
+
+        futures::finished(response)
+    }
+}
+
 pub struct Live {
     address: SocketAddr,
 }
 
 impl Live {
     pub fn new<S>(address: S) -> Live
-    where S: ToSocketAddrs {
+        where S: ToSocketAddrs {
         Live {
             address: address.to_socket_addrs().ok()
-                     .and_then(|mut addrs| addrs.next())
-                     .expect("Could not parse socket address."),
+                .and_then(|mut addrs| addrs.next())
+                .expect("Could not parse socket address."),
         }
     }
 
@@ -80,22 +188,12 @@ impl Live {
 
         let temp_dir =
             TempDir::new(configuration.output.file_name().unwrap().to_str().unwrap())
-                .unwrap();
+            .unwrap();
 
         configuration.output = temp_dir.path().to_path_buf();
 
         println!("output dir: {:?}", configuration.output);
         temp_dir
-    }
-}
-
-fn error_str(e: notify::Error) -> String {
-    match e {
-        notify::Error::Generic(e) => e.to_string(),
-        notify::Error::Io(e) => e.to_string(),
-        notify::Error::NotImplemented => String::from("Not Implemented"),
-        notify::Error::PathNotFound => String::from("Path Not Found"),
-        notify::Error::WatchNotFound => String::from("Watch Not Found"),
     }
 }
 
@@ -109,20 +207,25 @@ impl Command for Live {
 
         let (e_tx, e_rx) = channel();
 
-        let _guard =
-            Iron::new(Static::new(&site.configuration().output))
-            .http(self.address.clone())
-            .unwrap();
+        let output = site.configuration().output.clone();
+        let address = self.address.clone();
+
+        thread::spawn(move || {
+            let server = Http::new().bind(&address, move || Ok(FileServer::new(output.clone()))).unwrap();
+            println!("Listening on http://{}", server.local_addr().unwrap());
+            server.run().unwrap();
+        });
 
         let target = site.configuration().input.clone();
+        let input = site.configuration().input.canonicalize().unwrap();
 
         thread::spawn(move || {
             let (tx, rx) = channel();
-            let w: Result<RecommendedWatcher, notify::Error> = Watcher::new(tx);
+            let watcher: notify::Result<RecommendedWatcher> = Watcher::new(tx, ::std::time::Duration::from_millis(10));
 
-            match w {
+            match watcher {
                 Ok(mut watcher) => {
-                    match watcher.watch(&target) {
+                    match watcher.watch(&target, notify::RecursiveMode::Recursive) {
                         Ok(_) => {},
                         Err(e) => {
                             println!("some error with the live command: {:?}", e);
@@ -137,49 +240,152 @@ impl Command for Live {
                     loop {
                         match rx.try_recv() {
                             Ok(event) => {
-                                let now = SteadyTime::now();
-                                let is_contained =
-                                    event.path.as_ref()
-                                    .map(|p| set.contains(p))
-                                    .unwrap_or(false);
+                                use notify::DebouncedEvent::*;
 
-                                // past rebounce period
-                                if (now - last_bounce) > rebounce {
-                                    // past rebounce period, send events
-                                    if !set.is_empty() {
-                                        e_tx.send((set, now)).unwrap();
-                                        set = HashSet::new();
-                                    }
-                                }
-
-                                match event.op {
-                                    Ok(op) => {
-                                        trace!("event operation: {}",
-                                            match op {
-                                                ::notify::op::CHMOD => "chmod",
-                                                ::notify::op::CREATE => "create",
-                                                ::notify::op::REMOVE => "remove",
-                                                ::notify::op::RENAME => "rename",
-                                                ::notify::op::WRITE => "write",
-                                                _ => "unknown",
-                                        });
+                                match event {
+                                    NoticeWrite(path) => {
+                                        trace!("live: file notification: NoticeWrite {}", path.display());
                                     },
-                                    Err(e) => {
-                                        println!(
-                                            "notification error from path `{:?}`: {}",
-                                            event.path,
-                                            error_str(e));
+                                    NoticeRemove(path) => {
+                                        trace!("live: file notification: NoticeRemove {}", path.display());
+                                    },
+                                    Create(path) => {
+                                        trace!("live: file notification: Create {}", path.display());
+
+                                        let now = SteadyTime::now();
+                                        let is_contained = set.contains(&path);
+
+                                        // past rebounce period
+                                        if (now - last_bounce) > rebounce {
+                                            // past rebounce period, send events
+                                            if !set.is_empty() {
+                                                e_tx.send((set, now)).unwrap();
+                                                set = HashSet::new();
+                                            }
+                                        }
+
+                                        // within rebounce period
+                                        if !is_contained {
+                                            last_bounce = now;
+                                            // add path and extend rebounce
+                                            set.insert(path);
+                                        }
+                                    },
+                                    Write(path) => {
+                                        trace!("live: file notification: Write {}", path.display());
+
+                                        let now = SteadyTime::now();
+                                        let is_contained = set.contains(&path);
+
+                                        // past rebounce period
+                                        if (now - last_bounce) > rebounce {
+                                            // past rebounce period, send events
+                                            if !set.is_empty() {
+                                                e_tx.send((set, now)).unwrap();
+                                                set = HashSet::new();
+                                            }
+                                        }
+
+                                        // within rebounce period
+                                        if !is_contained {
+                                            last_bounce = now;
+                                            // add path and extend rebounce
+                                            set.insert(path);
+                                        }
+                                    },
+                                    Chmod(path) => {
+                                        trace!("live: file notification: Chmod {}", path.display());
+
+                                        let now = SteadyTime::now();
+                                        let is_contained = set.contains(&path);
+
+                                        // past rebounce period
+                                        if (now - last_bounce) > rebounce {
+                                            // past rebounce period, send events
+                                            if !set.is_empty() {
+                                                e_tx.send((set, now)).unwrap();
+                                                set = HashSet::new();
+                                            }
+                                        }
+
+                                        // within rebounce period
+                                        if !is_contained {
+                                            last_bounce = now;
+                                            // add path and extend rebounce
+                                            set.insert(path);
+                                        }
+                                    },
+                                    Remove(path) => {
+                                        trace!("live: file notification: Remove {}", path.display());
+
+                                        let now = SteadyTime::now();
+                                        let is_contained = set.contains(&path);
+
+                                        // past rebounce period
+                                        if (now - last_bounce) > rebounce {
+                                            // past rebounce period, send events
+                                            if !set.is_empty() {
+                                                e_tx.send((set, now)).unwrap();
+                                                set = HashSet::new();
+                                            }
+                                        }
+
+                                        // within rebounce period
+                                        if !is_contained {
+                                            last_bounce = now;
+                                            // add path and extend rebounce
+                                            set.insert(path);
+                                        }
+                                    },
+                                    Rename(from, to) => {
+                                        trace!("live: file notification: renamed {} to {}",
+                                               from.display(), to.display());
+
+                                        let now = SteadyTime::now();
+                                        let is_contained = set.contains(&from);
+
+                                        // past rebounce period
+                                        if (now - last_bounce) > rebounce {
+                                            // past rebounce period, send events
+                                            if !set.is_empty() {
+                                                e_tx.send((set, now)).unwrap();
+                                                set = HashSet::new();
+                                            }
+                                        }
+
+                                        // within rebounce period
+                                        if !is_contained {
+                                            last_bounce = now;
+                                            // add path and extend rebounce
+                                            set.insert(from);
+                                        }
+
+                                        let now = SteadyTime::now();
+                                        let is_contained = set.contains(&to);
+
+                                        // past rebounce period
+                                        if (now - last_bounce) > rebounce {
+                                            // past rebounce period, send events
+                                            if !set.is_empty() {
+                                                e_tx.send((set, now)).unwrap();
+                                                set = HashSet::new();
+                                            }
+                                        }
+
+                                        // within rebounce period
+                                        if !is_contained {
+                                            last_bounce = now;
+                                            // add to and extend rebounce
+                                            set.insert(to);
+                                        }
+                                    }
+                                    Rescan => {
+                                        trace!("live: file notification: rescaning");
+                                    }
+                                    Error(err, path) => {
+                                        println!("notification error from path `{:?}`: {}", path, err);
 
                                         ::std::process::exit(1);
-                                    }
-                                }
-
-                                // within rebounce period
-                                if let Some(path) = event.path {
-                                    if !is_contained {
-                                        last_bounce = now;
-                                        // add path and extend rebounce
-                                        set.insert(path);
                                     }
                                 }
                             },
@@ -207,7 +413,7 @@ impl Command for Live {
                     }
                 },
                 Err(e) => {
-                    println!("could not create watcher: {}", error_str(e));
+                    println!("could not create watcher: {}", e);
 
                     ::std::process::exit(1);
                 }
@@ -266,9 +472,7 @@ impl Command for Live {
             // TODO
             // this would probably become something like self.site.update();
             let paths = paths.into_iter()
-            .map(|p|
-                 p.strip_prefix(&site.configuration().input)
-                 .unwrap().to_path_buf())
+            .map(|p| p.strip_prefix(&input).unwrap().to_path_buf())
             .collect::<HashSet<PathBuf>>();
 
             let modified_label: &'static str = "  Modified";
